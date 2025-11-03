@@ -16,14 +16,6 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.context.annotation.Lazy;
 import org.springframework.stereotype.Service;
 import reactor.core.publisher.Flux;
-import org.springframework.context.annotation.Lazy;
-import org.springframework.beans.factory.annotation.Value;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
-import java.io.*;
-import java.net.URL;
-import java.net.URLConnection;
-import java.nio.file.Files;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -207,6 +199,8 @@ public class SmartQaServiceImpl implements SmartQaService {
             
             // 尝试通过标题和描述匹配关键词
             String[] keywords = extractKeywords(question);
+            
+            // 改进：如果有关键词，则使用关键词进行匹配；否则返回所有启用的文档
             if (keywords != null && keywords.length > 0) {
                 // 简化SQL逻辑：使用或查询，匹配任意关键词
                 queryWrapper.and(w -> {
@@ -221,6 +215,7 @@ public class SmartQaServiceImpl implements SmartQaService {
                     }
                 });
             }
+            // 注意：当关键词为空时，queryWrapper 只有 status 条件，会返回所有启用的文档
             
             queryWrapper.orderByDesc("view_count").last("LIMIT 5");
             
@@ -240,7 +235,7 @@ public class SmartQaServiceImpl implements SmartQaService {
                     context.append("   摘要：").append(knowledge.getDescription()).append("\n");
                 }
                 
-                // 添加文件内容
+                // 添加文件内容（关键步骤：下载并解析文件）
                 String fileContent = downloadAndParseFile(knowledge);
                 if (fileContent != null && !fileContent.isEmpty()) {
                     context.append(fileContent).append("\n");
@@ -250,6 +245,8 @@ public class SmartQaServiceImpl implements SmartQaService {
             
             return context.toString();
         } catch (Exception e) {
+            System.out.println("❌ 知识库检索异常: " + e.getMessage());
+            e.printStackTrace();
             return "";
         }
     }
@@ -449,26 +446,46 @@ public class SmartQaServiceImpl implements SmartQaService {
     
     /**
      * 提取关键词
+     * 改进版：更智能地提取有意义的关键词
      */
     private String[] extractKeywords(String question) {
-        // 简单的关键词提取，可以使用更复杂的NLP方法
-        String[] commonWords = {"吗", "呢", "啊", "的", "了", "是", "在", "有", "吗", 
-                "怎么", "如何", "什么", "哪里", "为什么", "能不能", "可以"};
-        
-        String cleaned = question;
-        for (String word : commonWords) {
-            cleaned = cleaned.replace(word, " ");
-        }
-        
-        String[] words = cleaned.trim().split("\\s+");
-        List<String> keywords = new ArrayList<>();
-        for (String word : words) {
-            if (word.length() >= 2) {
-                keywords.add(word);
+        try {
+            if (question == null || question.trim().isEmpty()) {
+                return new String[0];
             }
+            
+            // 常见的停用词（无实际意义的词）
+            String[] stopWords = {"吗", "呢", "啊", "的", "了", "是", "在", "有", "吗", 
+                    "怎么", "如何", "什么", "哪里", "为什么", "能不能", "可以", "和", "或", "及",
+                    "这", "那", "与", "而", "但", "等", "等等", "、", "，", "。", "！", "？"};
+            
+            // 移除标点符号和停用词
+            String cleaned = question;
+            for (String word : stopWords) {
+                cleaned = cleaned.replace(word, " ");
+            }
+            
+            // 分词处理
+            String[] words = cleaned.trim().split("\\s+|,|，|。|！|？");
+            List<String> keywords = new ArrayList<>();
+            for (String word : words) {
+                String w = word.trim();
+                // 只保留长度 >= 2 的有效词汇
+                if (!w.isEmpty() && w.length() >= 2) {
+                    keywords.add(w);
+                }
+            }
+            
+            // 如果关键词太多，只取前5个最有可能的关键词
+            if (keywords.size() > 5) {
+                return keywords.subList(0, 5).toArray(new String[0]);
+            }
+            
+            return keywords.toArray(new String[0]);
+        } catch (Exception e) {
+            System.out.println("⚠️ 关键词提取异常: " + e.getMessage());
+            return new String[0];
         }
-        
-        return keywords.toArray(new String[0]);
     }
     
     /**
@@ -577,22 +594,55 @@ public class SmartQaServiceImpl implements SmartQaService {
             System.out.println("🔗 文件路径: " + knowledge.getFilePath());
             System.out.println("📄 文件类型: " + knowledge.getFileType());
             
+            // 改进：添加文件路径的有效性检查
+            if (knowledge.getFilePath().trim().isEmpty()) {
+                System.out.println("❌ 文件路径为空字符串");
+                return "";
+            }
+            
             java.io.File dir = new java.io.File("./temp/knowledge");
             if (!dir.exists()) {
-                dir.mkdirs();
-                System.out.println("✅ 创建临时目录: " + dir.getAbsolutePath());
+                boolean created = dir.mkdirs();
+                if (created) {
+                    System.out.println("✅ 创建临时目录: " + dir.getAbsolutePath());
+                } else {
+                    System.out.println("❌ 创建临时目录失败");
+                }
             }
             
             System.out.println("⬇️  正在下载文件...");
             f = downloadFile(knowledge.getFilePath(), knowledge.getId());
             if (f == null) {
-                System.out.println("❌ 文件下载失败");
+                System.out.println("❌ 文件下载失败，downloadFile 返回 null");
                 return "";
             }
+            
+            if (!f.exists()) {
+                System.out.println("❌ 下载的文件不存在: " + f.getAbsolutePath());
+                return "";
+            }
+            
             System.out.println("✅ 文件下载成功: " + f.getAbsolutePath());
             System.out.println("📊 文件大小: " + f.length() + " 字节");
             
+            if (f.length() == 0) {
+                System.out.println("❌ 下载的文件大小为 0 字节");
+                return "";
+            }
+            
             String t = knowledge.getFileType();
+            if (t == null || t.trim().isEmpty()) {
+                System.out.println("⚠️ 文件类型为空，尝试从文件路径推断");
+                String path = knowledge.getFilePath().toLowerCase();
+                if (path.endsWith(".docx")) {
+                    t = "docx";
+                } else if (path.endsWith(".pdf")) {
+                    t = "pdf";
+                } else {
+                    t = "txt";
+                }
+            }
+            
             String content = "";
             System.out.println("🔄 正在解析文件内容 (" + t + ")...");
             
@@ -608,7 +658,8 @@ public class SmartQaServiceImpl implements SmartQaService {
                 System.out.println("✅ 文件解析成功，内容长度: " + content.length() + " 字符");
                 return "【来自文档: " + knowledge.getTitle() + " ("+knowledge.getFileType()+")】\n" + content;
             }
-            System.out.println("⚠️ 文件内容为空");
+            
+            System.out.println("⚠️ 文件内容为空，可能是文件内容本身为空或解析失败");
             return "";
         } catch (Exception e) {
             System.out.println("❌ 处理文档时出错: " + e.getMessage());
@@ -634,12 +685,29 @@ public class SmartQaServiceImpl implements SmartQaService {
 
     private java.io.File downloadFile(String url, Long id) {
         try {
+            // 改进：验证URL
+            if (url == null || url.trim().isEmpty()) {
+                System.out.println("  [下载] URL 为空");
+                return null;
+            }
+            
             System.out.println("  [下载] URL: " + url);
+            System.out.println("  [下载] 文档ID: " + id);
+            
             java.net.URL u = new java.net.URL(url);
             java.net.URLConnection c = u.openConnection();
             c.setConnectTimeout(30000);
             c.setReadTimeout(30000);
+            c.setRequestProperty("User-Agent", "Mozilla/5.0");
             System.out.println("  [下载] 连接建立成功，开始传输...");
+            
+            int contentLength = c.getContentLength();
+            System.out.println("  [下载] 内容大小: " + (contentLength > 0 ? contentLength + " 字节" : "未知"));
+            
+            if (contentLength == 0) {
+                System.out.println("  [下载] ⚠️ 警告：内容大小为 0");
+                return null;
+            }
             
             java.io.File f = new java.io.File("./temp/knowledge", "knowledge_" + id + "_" + System.currentTimeMillis() + getFileExt(url));
             try (java.io.InputStream in = c.getInputStream();
@@ -652,10 +720,27 @@ public class SmartQaServiceImpl implements SmartQaService {
                     totalBytes += n;
                 }
                 System.out.println("  [下载] 传输完成，共 " + totalBytes + " 字节");
+                
+                if (totalBytes == 0) {
+                    System.out.println("  [下载] ❌ 错误：下载的文件为空");
+                    f.delete();
+                    return null;
+                }
+                
                 return f;
             }
+        } catch (java.net.MalformedURLException e) {
+            System.out.println("  [下载] URL 格式错误: " + e.getMessage());
+            return null;
+        } catch (java.net.ConnectException e) {
+            System.out.println("  [下载] 连接错误: " + e.getMessage());
+            return null;
+        } catch (java.net.SocketTimeoutException e) {
+            System.out.println("  [下载] 超时: " + e.getMessage());
+            return null;
         } catch (Exception e) { 
-            System.out.println("  [下载] 异常: " + e.getMessage());
+            System.out.println("  [下载] 异常: " + e.getClass().getName() + " - " + e.getMessage());
+            e.printStackTrace();
             return null; 
         }
     }
